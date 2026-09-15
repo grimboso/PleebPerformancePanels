@@ -1,0 +1,3 @@
+# Keep text files CRLF in Windows working trees while Git stores normalized text internally.
+* text eol=crlf
+/[Ll]ibs/** -text
