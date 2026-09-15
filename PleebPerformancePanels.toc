@@ -2,7 +2,8 @@
 ## Title: Pleeb Performance Panel
 ## Notes: Lightweight FPS and addon CPU panel with tooltip (avg, 10% low, 1% low).
 ## Author: Pleeb
-## Version: 0.1.0
+## Version: @project-version@
+## X-Curse-Project-ID: 1471151
 ## Category-enUS: PleebUI
 ## IconTexture: Interface\Addons\PleebPerformancePanels\Media\Logo.tga
 ## SavedVariables: PPPDB
