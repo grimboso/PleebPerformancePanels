@@ -1,3 +1,7 @@
-# Keep text files CRLF in Windows working trees while Git stores normalized text internally.
-* text eol=crlf
+# Keep detected text files CRLF in Windows working trees while Git stores normalized text internally.
+* text=auto eol=crlf
+*.png -text
+*.tga -text
+*.ttf -text
+*.otf -text
 /[Ll]ibs/** -text
