@@ -1030,6 +1030,21 @@ function PPP:BuildFrame()
 end
 
 
+function PPP:AttachToPleeBar(holder)
+  local frame = self._frame
+  self._embeddedInPleeBar = true
+
+  frame:StopMovingOrSizing()
+  frame:SetMovable(false)
+  frame:RegisterForDrag()
+  frame:SetScript("OnDragStart", nil)
+  frame:SetScript("OnDragStop", nil)
+  if pleebUIPlugin then
+    pleebUIPlugin:UnregisterMover("panel")
+  end
+  frame:SetParent(holder)
+end
+
 local function StatsPush(stats, v)
   if not stats then return end
   StatsAdd(stats, v)
@@ -1881,7 +1896,7 @@ function PPP:ShowTooltip(forceExpanded, fromAltWatcher)
     -- Row 4: CPU Top AddOns + Controls
     t:SetCell(4, 1, blockAddonCPU())
     t:SetCell(4, 2, (cAccent .. "Controls|r\n  " .. cDim ..
-      "ALT: expand/collapse\n  Click CPU: stop logging\n  Drag: move panel\n  /pp: options\n  /pp reset\n  /pp toggle|r"))
+      "ALT: expand/collapse\n  Click CPU: stop logging\n" .. (self._embeddedInPleeBar and "" or "  Drag: move panel\n") .. "  /pp: options\n  /pp reset\n  /pp toggle|r"))
 
 
     t:Layout(true)
@@ -3109,7 +3124,7 @@ local function RegisterPleebUIPlugin()
 end
 
 local function RegisterPleebUIMover()
-  if not pleebUIPlugin or not PPP._frame then
+  if not pleebUIPlugin or not PPP._frame or PPP._embeddedInPleeBar then
     return
   end
 
