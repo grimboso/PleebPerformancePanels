@@ -1,4 +1,4 @@
-## Interface: 120001
+## Interface: 120100, 120105
 ## Title: Pleeb Performance Panel
 ## Notes: Lightweight FPS and addon CPU panel with tooltip (avg, 10% low, 1% low).
 ## Author: Pleeb
