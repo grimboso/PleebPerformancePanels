@@ -759,13 +759,16 @@ function PPP:ApplyLayout()
   self._lastDurDisplayKey = nil
   self._lastCPUDisplayKey = nil
   self._lastCPULoggingState = nil
+  self._lastCPUQueryT = nil
+  self._cpuRecent = nil
 
-  if self._cpuLogButton then
-    self._cpuLogButton:SetShown(o.showCPU == true)
-  end
+  self._textFPS:SetShown(o.showFPS == true)
+  self._textMS:SetShown(o.showMS == true)
+  self._textDur:SetShown(o.showDur == true)
+  self._textCPU:SetShown(o.showCPU == true)
+  self._cpuLogButton:SetShown(o.showCPU == true)
+  f:SetShown(o.enabled == true and (o.showFPS or o.showMS or o.showDur or o.showCPU))
 
-  -- Cache sampling interval for the snapshot ticker.
-  self._sampleInterval = Clamp(tonumber(o.sampleInterval) or 0.5, 0.05, 1.0)
 
   ApplyPanelFont(f)
   ApplyPanelTheme(f)
@@ -946,8 +949,7 @@ function PPP:StartTicker()
     return
   end
 
-  local interval = Clamp(tonumber(self._sampleInterval) or tonumber(o.sampleInterval) or 0.5, 0.05, 1.0)
-  self._sampleInterval = interval
+  local interval = Clamp(tonumber(o.sampleInterval) or 0.5, 0.1, 2.0)
 
   -- Kick one immediate sample so the panel updates instantly.
   self:OnSampleTick(GetTime())
@@ -1050,7 +1052,7 @@ local function StatsPush(stats, v)
   StatsAdd(stats, v)
 end
 
-local function RollingPush(samples, nowT, v, windowSec)
+local function RollingPush(samples, nowT, v)
   if not samples then return end
   v = tonumber(v)
   if not v then return end
@@ -1069,10 +1071,6 @@ local function RollingPush(samples, nowT, v, windowSec)
   local n = #tArr + 1
   tArr[n] = nowT
   vArr[n] = v
-
-  if windowSec then
-    RollingTrim(samples, windowSec, nowT)
-  end
 end
 
 local function HistPush(hist, v)
@@ -1138,11 +1136,6 @@ function PPP:GetDurabilityPercent()
 end
 
 local function ApplyFrameState(self, o, fps, ms, dur, cpuRecent)
-  local f = self._frame
-  if not f then return end
-
-  local showAny = false
-
   if o.showFPS then
     local key = fps and floor(fps + 0.5) or false
     if self._lastFPSDisplayKey ~= key then
@@ -1154,10 +1147,6 @@ local function ApplyFrameState(self, o, fps, ms, dur, cpuRecent)
         self._textFPS:SetText("FPS: -")
       end
     end
-    if not self._textFPS:IsShown() then self._textFPS:Show() end
-    showAny = true
-  elseif self._textFPS:IsShown() then
-    self._textFPS:Hide()
   end
 
   if o.showMS then
@@ -1171,10 +1160,6 @@ local function ApplyFrameState(self, o, fps, ms, dur, cpuRecent)
         self._textMS:SetText("PING: -")
       end
     end
-    if not self._textMS:IsShown() then self._textMS:Show() end
-    showAny = true
-  elseif self._textMS:IsShown() then
-    self._textMS:Hide()
   end
 
   if o.showDur then
@@ -1188,10 +1173,6 @@ local function ApplyFrameState(self, o, fps, ms, dur, cpuRecent)
         self._textDur:SetText("DUR: -")
       end
     end
-    if not self._textDur:IsShown() then self._textDur:Show() end
-    showAny = true
-  elseif self._textDur:IsShown() then
-    self._textDur:Hide()
   end
 
   if o.showCPU then
@@ -1209,16 +1190,6 @@ local function ApplyFrameState(self, o, fps, ms, dur, cpuRecent)
         self._textCPU:SetText(label .. ": -")
       end
     end
-    if not self._textCPU:IsShown() then self._textCPU:Show() end
-    if self._cpuLogButton and not self._cpuLogButton:IsShown() then self._cpuLogButton:Show() end
-    showAny = true
-  else
-    if self._textCPU:IsShown() then self._textCPU:Hide() end
-    if self._cpuLogButton and self._cpuLogButton:IsShown() then self._cpuLogButton:Hide() end
-  end
-
-  if f:IsShown() ~= showAny then
-    f:SetShown(showAny)
   end
 end
 
@@ -1249,17 +1220,19 @@ end
 
 
 function PPP:OnSampleTick(nowT)
-  if not self._frame then return end
+  local frame = self._frame
+  if not frame then return end
 
   local o = self._options or GetOptions()
   if not o.enabled then
-    if self._frame:IsShown() then self._frame:Hide() end
+    if frame:IsShown() then frame:Hide() end
     return
   end
 
-  local s = GetSession()
   nowT = nowT or GetTime()
-  if not s.sessionStartT then
+  local logging = self._loggingEnabled == true
+  local s = logging and GetSession() or nil
+  if s and not s.sessionStartT then
     s.sessionStartT = nowT
   end
 
@@ -1269,18 +1242,18 @@ function PPP:OnSampleTick(nowT)
     self._profilerEnabled = AddOnProfilerEnabled()
     self._profilerStateCheckT = nowT
     if wasEnabled ~= self._profilerEnabled then
+      self._lastCPUQueryT = nil
+      self._cpuRecent = nil
       self:StartCPULogger()
       self._lastCPUDisplayKey = nil
     end
   end
 
-  local logging = self._loggingEnabled == true
-  local ignoreInitial = logging and ShouldIgnoreInitialSamples(nowT, o, s) or false
-  local windowSec = logging and ((tonumber(o.rollingMinutes) or 8) * 60) or nil
-
-  if logging and not ignoreInitial then
+  local recordSample = logging and not ShouldIgnoreInitialSamples(nowT, o, s)
+  if recordSample then
     local lastTrim = tonumber(s._lastTrimT) or 0
     if (nowT - lastTrim) >= 5 then
+      local windowSec = (tonumber(o.rollingMinutes) or 8) * 60
       if o.showFPS then RollingTrim(s.fpsSamples, windowSec, nowT) end
       if o.showMS  then RollingTrim(s.msSamples,  windowSec, nowT) end
       if o.showCPU then RollingTrim(s.cpuSamples, windowSec, nowT) end
@@ -1288,24 +1261,19 @@ function PPP:OnSampleTick(nowT)
     end
   end
 
-  local fps = nil
-  local ms = nil
-  local dur = nil
-  local cpuRecent = nil
+  local fps, ms, dur, cpuRecent
 
   if o.showFPS and GetFramerate then
     fps = GetFramerate()
-
-    if logging and not ignoreInitial then
+    if recordSample then
       StatsPush(s.sessFPS, fps)
-      RollingPush(s.fpsSamples, nowT, fps, windowSec)
+      RollingPush(s.fpsSamples, nowT, fps)
       HistPush(s.sessFPSHist, fps)
 
       if s.inCombat and s.combatFPS and s.combatFPS.active then
         StatsAdd(s.combatFPS, fps)
         tinsert(s.combatFPSsamples, fps)
       end
-
       if s.inEncounter and s.encFPS and s.encFPS.active then
         StatsAdd(s.encFPS, fps)
         tinsert(s.encFPSsamples, fps)
@@ -1315,10 +1283,9 @@ function PPP:OnSampleTick(nowT)
 
   if o.showMS then
     ms = GetPingMS(o)
-
-    if logging and not ignoreInitial and ms then
+    if recordSample and ms then
       StatsPush(s.sessMS, ms)
-      RollingPush(s.msSamples, nowT, ms, windowSec)
+      RollingPush(s.msSamples, nowT, ms)
     end
   end
 
@@ -1326,28 +1293,29 @@ function PPP:OnSampleTick(nowT)
     if cachedDurabilityPct == nil then
       RefreshDurabilityPct(true)
     end
-
     dur = cachedDurabilityPct or nil
-    if dur then
-      s.lastDurLow = dur
-    end
   end
 
   if o.showCPU and self._profilerEnabled == true then
-    cpuRecent = AP_GetOverall(METRIC_RECENT_AVG)
+    local lastCPUQueryT = self._lastCPUQueryT
+    if not lastCPUQueryT or (nowT - lastCPUQueryT) >= 1 then
+      self._lastCPUQueryT = nowT
+      self._cpuRecent = AP_GetOverall(METRIC_RECENT_AVG)
+    end
+    cpuRecent = self._cpuRecent
   end
 
-  if logging and not ignoreInitial and o.showCPU then
+  if recordSample and o.showCPU then
     local bucketCount = tonumber(s._cpuBucketCount) or 0
     if bucketCount > 0 then
       local bucketAverage = (tonumber(s._cpuBucketSum) or 0) / bucketCount
-      RollingPush(s.cpuSamples, nowT, bucketAverage, windowSec)
+      RollingPush(s.cpuSamples, nowT, bucketAverage)
       s._cpuBucketSum = 0
       s._cpuBucketCount = 0
     end
   end
 
-  ApplyFrameState(self, o, fps, ms, (s.lastDurLow or dur), cpuRecent)
+  ApplyFrameState(self, o, fps, ms, dur, cpuRecent)
 
   if logging and self._tooltip and self._tooltip:IsShown() then
     local lastTooltipRefresh = tonumber(self._lastTooltipRefreshT) or 0
