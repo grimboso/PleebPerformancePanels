@@ -929,12 +929,8 @@ function PPP:SetLoggingEnabled(enabled)
     self._cpuLogIgnoreRemaining = nil
   end
 
-  -- Keep the lightweight frame collector running for the live CPU snapshot.
   self:StartCPULogger()
-
-  if self._frame then
-    self:OnSampleTick(GetTime())
-  end
+  self:StartTicker()
 
   if self._tooltip and self._tooltip:IsShown() then
     self:ShowTooltip(nil, true)
@@ -945,19 +941,20 @@ function PPP:StartTicker()
   self:StopTicker()
 
   local o = self._options or GetOptions()
-  if not o.enabled then
+  if not o.enabled or not self._frame or not self._frame:IsVisible() then
     return
   end
 
   local interval = Clamp(tonumber(o.sampleInterval) or 0.5, 0.1, 2.0)
+  if self._loggingEnabled ~= true then
+    interval = max(1, interval)
+  end
 
   -- Kick one immediate sample so the panel updates instantly.
   self:OnSampleTick(GetTime())
 
   self._ticker = C_Timer.NewTicker(interval, function()
-    if PPP and PPP._frame and PPP._frame:IsVisible() then
-      PPP:OnSampleTick(GetTime())
-    end
+    PPP:OnSampleTick(GetTime())
   end)
 end
 
@@ -1023,6 +1020,14 @@ function PPP:BuildFrame()
     PPP:SetLoggingEnabled(not PPP:IsLogging())
   end)
   self._cpuLogButton = cpuLogButton
+
+  f:SetScript("OnShow", function()
+    PPP:StartTicker()
+  end)
+  f:SetScript("OnHide", function()
+    PPP:StopTicker()
+    PPP:HideTooltip()
+  end)
 
   ApplyPanelFont(f)
   ApplyPanelTheme(f)
@@ -1194,11 +1199,6 @@ local function ApplyFrameState(self, o, fps, ms, dur, cpuRecent)
 end
 
 
-function PPP:OnSample(nowT)
-  self:OnSampleTick(nowT)
-end
-
-
 local function ShouldIgnoreInitialSamples(nowT, o, s)
   local ignoreSec = tonumber(o and o.apIgnoreFirstSec) or 0
   if ignoreSec <= 0 then return false end
@@ -1237,7 +1237,7 @@ function PPP:OnSampleTick(nowT)
   end
 
   local lastProfilerCheck = tonumber(self._profilerStateCheckT) or 0
-  if self._profilerEnabled == nil or (nowT - lastProfilerCheck) >= 5 then
+  if o.showCPU and (self._profilerEnabled == nil or (nowT - lastProfilerCheck) >= 5) then
     local wasEnabled = self._profilerEnabled
     self._profilerEnabled = AddOnProfilerEnabled()
     self._profilerStateCheckT = nowT
@@ -1893,9 +1893,8 @@ function PPP:EnsureDriver()
   d:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
 
   d:SetScript("OnEvent", function(_, event, ...)
-    local s = GetSession()
-
     if event == "PLAYER_ENTERING_WORLD" then
+      local s = GetSession()
       local isInitialLogin, isReloadingUi = ...
       local o = PPP._options or GetOptions()
 
@@ -1931,6 +1930,9 @@ function PPP:EnsureDriver()
       RefreshDurabilityPct(false)
       return
     end
+
+    if PPP._loggingEnabled ~= true then return end
+    local s = GetSession()
 
     if event == "PLAYER_REGEN_DISABLED" then
       s.inCombat = true
@@ -2018,10 +2020,6 @@ function PPP:SetEnabled(enabled)
   if o.enabled then
     self:EnsurePerfPanel(true)
     self:EnsureDriver()
-
-    if self._frame then
-      self._frame:Show()
-    end
 
     self:StartTicker()
     self:StartCPULogger()
@@ -2512,7 +2510,8 @@ function PPP:BuildAceGUIOptions(parent)
       local samp = AceGUI:Create("Slider")
       if samp then
         Mark(samp)
-        samp:SetLabel("Sample interval (sec)")
+        samp:SetLabel("Logging sample interval (sec)")
+        samp:SetDescription("Snapshots update at most once per second while logging is off.")
         samp:SetSliderValues(0.1, 2.0, 0.1)
         samp:SetValue(tonumber(o.sampleInterval) or 0.5)
         samp:SetCallback("OnValueChanged", function(_, _, v)
