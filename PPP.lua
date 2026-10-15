@@ -39,6 +39,9 @@ local optionsWindow = nil
 local optionsInitialized = false
 local pleebUIPlugin
 local cachedDurabilityPct = nil
+local lastDurabilityRefreshT = nil
+local durabilityRefreshTimer = nil
+local DURABILITY_REFRESH_INTERVAL = 3
 
 local PPP_StyleOptionsWidget
 
@@ -685,20 +688,6 @@ local function GetPingMS(o)
   return tonumber(world) or nil
 end
 
-local function ColorForDur(o, pct)
-  if not (o and o.colorize) or not pct then return 1, 1, 1 end
-  if pct <= 25 then return 1.00, 0.25, 0.25 end
-  if pct <= 50 then return 1.00, 0.65, 0.20 end
-  return 0.85, 0.95, 0.85
-end
-
-local function ColorForCPU(o, ms)
-  if not (o and o.colorize) or not ms then return 1, 1, 1 end
-  if ms >= 5.0 then return 1.00, 0.25, 0.25 end
-  if ms >= 1.0 then return 1.00, 0.65, 0.20 end
-  return 0.85, 0.95, 0.85
-end
-
 local function AvgBottomPercent(arr, frac)
   if not arr or #arr == 0 then return nil end
   frac = Clamp(tonumber(frac) or 0.10, 0.001, 1.0)
@@ -749,18 +738,54 @@ local function BuildTopAddons(o)
   return out
 end
 
+local function BuildPanelMetricFormats(o, label, valueFormat, good, warn, bad)
+  local formats = {}
+  local colors = { good, warn, bad }
+  for i = 1, 3 do
+    local color = colors[i]
+    local prefix = o.colorize and _hex(color[1], color[2], color[3]) or cStrong
+    formats[i] = prefix .. label .. "|r: " .. cStrong .. valueFormat .. "|r"
+  end
+  return formats
+end
+
+local function RefreshDurabilityText()
+  local o = PPP._options or GetOptions()
+  if not PPP._durFormats or not o.enabled or not o.showDur then return end
+
+  local key = cachedDurabilityPct and floor(cachedDurabilityPct + 0.5) or false
+  if PPP._lastDurDisplayKey == key then return end
+  PPP._lastDurDisplayKey = key
+  if key then
+    local state = key <= 25 and 3 or (key <= 50 and 2 or 1)
+    PPP._textDur:SetFormattedText(PPP._durFormats[state], key)
+  else
+    PPP._textDur:SetText("DUR: -")
+  end
+end
+
 function PPP:ApplyLayout()
   local o = self._options or GetOptions()
   local f = self._frame
   if not f then return end
+
+  local colors = o.colors
+  local good, warn, bad = { 0.85, 0.95, 0.85 }, { 1.00, 0.65, 0.20 }, { 1.00, 0.25, 0.25 }
+  self._fpsFormats = BuildPanelMetricFormats(o, "FPS", "%d", colors.fpsGood, colors.fpsWarn, colors.fpsBad)
+  self._pingFormats = BuildPanelMetricFormats(o, "Ping", "%d", colors.pingGood, colors.pingWarn, colors.pingBad)
+  self._durFormats = BuildPanelMetricFormats(o, "DUR", "%d%%", good, warn, bad)
+  self._cpuFormats = BuildPanelMetricFormats(o, "CPU", "%.3f ms", good, warn, bad)
+  self._cpuLoggingFormats = BuildPanelMetricFormats(o, "CPU*", "%.3f ms", good, warn, bad)
+  self._fpsWarnAt = o.fpsGoal * o.fpsOrangePct
+  self._fpsBadAt = o.fpsGoal * o.fpsRedPct
+  self._pingWarnAt = o.pingBaseline + o.pingOrangeAdd
+  self._pingBadAt = o.pingBaseline + o.pingRedAdd
 
   self._lastFPSDisplayKey = nil
   self._lastMSDisplayKey = nil
   self._lastDurDisplayKey = nil
   self._lastCPUDisplayKey = nil
   self._lastCPULoggingState = nil
-  self._lastCPUQueryT = nil
-  self._cpuRecent = nil
 
   self._textFPS:SetShown(o.showFPS == true)
   self._textMS:SetShown(o.showMS == true)
@@ -815,6 +840,12 @@ function PPP:ApplyLayout()
     f:SetWidth(140)
     f:SetHeight(math.max(22, (-y) + padY))
   end
+
+  if o.showDur then
+    self:GetDurabilityPercent()
+    RefreshDurabilityText()
+  end
+  self:StartTicker()
 end
 
 function PPP:OpenConfig()
@@ -946,9 +977,7 @@ function PPP:StartTicker()
   end
 
   local interval = Clamp(tonumber(o.sampleInterval) or 0.5, 0.1, 2.0)
-  if self._loggingEnabled ~= true then
-    interval = max(1, interval)
-  end
+  if not (o.showFPS or o.showMS or o.showCPU) then return end
 
   -- Kick one immediate sample so the panel updates instantly.
   self:OnSampleTick(GetTime())
@@ -1124,11 +1153,31 @@ local function PublishDurabilityPct()
 end
 
 local function RefreshDurabilityPct(forcePublish)
+  if durabilityRefreshTimer then
+    durabilityRefreshTimer:Cancel()
+    durabilityRefreshTimer = nil
+  end
+  lastDurabilityRefreshT = GetTime()
   local previous = cachedDurabilityPct
   cachedDurabilityPct = GetLowestDurabilityPct() or false
 
   if forcePublish or previous ~= cachedDurabilityPct then
     PublishDurabilityPct()
+  end
+  RefreshDurabilityText()
+end
+
+local function QueueDurabilityRefresh()
+  if durabilityRefreshTimer then return end
+
+  local remaining = lastDurabilityRefreshT and (DURABILITY_REFRESH_INTERVAL - (GetTime() - lastDurabilityRefreshT)) or 0
+  if remaining <= 0 then
+    RefreshDurabilityPct(false)
+  else
+    durabilityRefreshTimer = C_Timer.NewTimer(remaining, function()
+      durabilityRefreshTimer = nil
+      RefreshDurabilityPct(false)
+    end)
   end
 end
 
@@ -1140,14 +1189,14 @@ function PPP:GetDurabilityPercent()
   return cachedDurabilityPct or nil
 end
 
-local function ApplyFrameState(self, o, fps, ms, dur, cpuRecent)
+local function ApplyFrameState(self, o, fps, ms, cpuRecent)
   if o.showFPS then
     local key = fps and floor(fps + 0.5) or false
     if self._lastFPSDisplayKey ~= key then
       self._lastFPSDisplayKey = key
       if key then
-        local r, g, b = ColorForFPS(o, key)
-        self._textFPS:SetText(_hex(r, g, b) .. "FPS|r: " .. cStrong .. format("%d", key) .. "|r")
+        local state = key <= self._fpsBadAt and 3 or (key <= self._fpsWarnAt and 2 or 1)
+        self._textFPS:SetFormattedText(self._fpsFormats[state], key)
       else
         self._textFPS:SetText("FPS: -")
       end
@@ -1159,23 +1208,10 @@ local function ApplyFrameState(self, o, fps, ms, dur, cpuRecent)
     if self._lastMSDisplayKey ~= key then
       self._lastMSDisplayKey = key
       if key then
-        local r, g, b = ColorForPing(o, key)
-        self._textMS:SetText(_hex(r, g, b) .. "Ping|r: " .. cStrong .. format("%d", key) .. "|r")
+        local state = key >= self._pingBadAt and 3 or (key >= self._pingWarnAt and 2 or 1)
+        self._textMS:SetFormattedText(self._pingFormats[state], key)
       else
         self._textMS:SetText("PING: -")
-      end
-    end
-  end
-
-  if o.showDur then
-    local key = dur and floor(dur + 0.5) or false
-    if self._lastDurDisplayKey ~= key then
-      self._lastDurDisplayKey = key
-      if key then
-        local r, g, b = ColorForDur(o, key)
-        self._textDur:SetText(_hex(r, g, b) .. "DUR|r: " .. cStrong .. format("%d%%", key) .. "|r")
-      else
-        self._textDur:SetText("DUR: -")
       end
     end
   end
@@ -1186,13 +1222,12 @@ local function ApplyFrameState(self, o, fps, ms, dur, cpuRecent)
     if self._lastCPUDisplayKey ~= key or self._lastCPULoggingState ~= logging then
       self._lastCPUDisplayKey = key
       self._lastCPULoggingState = logging
-      local label = logging and "CPU*" or "CPU"
       if key then
-        local value = key / 1000
-        local r, g, b = ColorForCPU(o, value)
-        self._textCPU:SetText(_hex(r, g, b) .. label .. "|r: " .. cStrong .. format("%.3f ms", value) .. "|r")
+        local state = key >= 5000 and 3 or (key >= 1000 and 2 or 1)
+        local formats = logging and self._cpuLoggingFormats or self._cpuFormats
+        self._textCPU:SetFormattedText(formats[state], key / 1000)
       else
-        self._textCPU:SetText(label .. ": -")
+        self._textCPU:SetText(logging and "CPU*: -" or "CPU: -")
       end
     end
   end
@@ -1242,8 +1277,6 @@ function PPP:OnSampleTick(nowT)
     self._profilerEnabled = AddOnProfilerEnabled()
     self._profilerStateCheckT = nowT
     if wasEnabled ~= self._profilerEnabled then
-      self._lastCPUQueryT = nil
-      self._cpuRecent = nil
       self:StartCPULogger()
       self._lastCPUDisplayKey = nil
     end
@@ -1261,7 +1294,7 @@ function PPP:OnSampleTick(nowT)
     end
   end
 
-  local fps, ms, dur, cpuRecent
+  local fps, ms, cpuRecent
 
   if o.showFPS and GetFramerate then
     fps = GetFramerate()
@@ -1289,20 +1322,8 @@ function PPP:OnSampleTick(nowT)
     end
   end
 
-  if o.showDur then
-    if cachedDurabilityPct == nil then
-      RefreshDurabilityPct(true)
-    end
-    dur = cachedDurabilityPct or nil
-  end
-
   if o.showCPU and self._profilerEnabled == true then
-    local lastCPUQueryT = self._lastCPUQueryT
-    if not lastCPUQueryT or (nowT - lastCPUQueryT) >= 1 then
-      self._lastCPUQueryT = nowT
-      self._cpuRecent = AP_GetOverall(METRIC_RECENT_AVG)
-    end
-    cpuRecent = self._cpuRecent
+    cpuRecent = AP_GetOverall(METRIC_RECENT_AVG)
   end
 
   if recordSample and o.showCPU then
@@ -1315,7 +1336,7 @@ function PPP:OnSampleTick(nowT)
     end
   end
 
-  ApplyFrameState(self, o, fps, ms, dur, cpuRecent)
+  ApplyFrameState(self, o, fps, ms, cpuRecent)
 
   if logging and self._tooltip and self._tooltip:IsShown() then
     local lastTooltipRefresh = tonumber(self._lastTooltipRefreshT) or 0
@@ -1927,7 +1948,7 @@ function PPP:EnsureDriver()
     end
 
     if event == "UPDATE_INVENTORY_DURABILITY" or event == "PLAYER_EQUIPMENT_CHANGED" then
-      RefreshDurabilityPct(false)
+      QueueDurabilityRefresh()
       return
     end
 
@@ -2510,8 +2531,7 @@ function PPP:BuildAceGUIOptions(parent)
       local samp = AceGUI:Create("Slider")
       if samp then
         Mark(samp)
-        samp:SetLabel("Logging sample interval (sec)")
-        samp:SetDescription("Snapshots update at most once per second while logging is off.")
+        samp:SetLabel("Sample interval (sec)")
         samp:SetSliderValues(0.1, 2.0, 0.1)
         samp:SetValue(tonumber(o.sampleInterval) or 0.5)
         samp:SetCallback("OnValueChanged", function(_, _, v)
